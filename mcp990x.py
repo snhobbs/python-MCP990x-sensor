@@ -3,20 +3,121 @@
 """This module allows driving the I2C temp sensor"""
 import smbus
 
+class Temperature:
+    def __init__(self, value, unit="celsius"):
+        k = value
+        if unit.lower() in ["celsius", "c"]:
+            k = self.celsius_to_kelvin(value)
+        elif unit.lower() in ["fahrenheit", "f"]:
+            k = self.fahrenheit_to_kelvin(value)
+        elif unit.lower() in ["kelvin", "k"]:
+            pass
+        else:
+            raise ValueError("unknown unit %s", str(unit))
+        self._kelvin = k
 
-class Sensor(object):
+    def __repr__(self):
+        return str(self.celsius)
+
+    def __lt__(self, b):
+        return self.kelvin < b.kelvin
+
+    def __gt__(self, b):
+        return self.kelvin > b.kelvin
+
+    def __eq__(self, b):
+        return self.kelvin == b.kelvin
+
+    def __ge__(self, b):
+        return self.kelvin >= b.kelvin
+
+    def __le__(self, b):
+        return self.kelvin <= b.kelvin
+
+    @staticmethod
+    def kelvin_to_celsius(value):
+        return value - 273.15
+
+    @classmethod
+    def kelvin_to_fahrenheit(cls, value):
+        return 1.8*cls.kelvin_to_celsius(value) + 32
+
+    @staticmethod
+    def celsius_to_kelvin(value):
+        return value + 273.15
+
+    @staticmethod
+    def fahrenheit_to_kelvin(value):
+        return (value - 32)/1.8
+
+    @property
+    def k(self):
+        return self._kelvin
+
+    @property
+    def kelvin(self):
+        return self._kelvin
+
+    @property
+    def c(self):
+        return self.celsius
+
+    @property
+    def celsius(self):
+        return self.kelvin_to_celsius(self.kelvin)
+
+    @property
+    def f(self):
+        return self.fahrenheit
+
+    @property
+    def fahrenheit(self):
+        return self.kelvin_to_fahrenheit(self.kelvin)
+
+
+assert Temperature(0, "c").fahrenheit == 32
+assert Temperature(0, "k").c == -273.15
+assert Temperature(0, "c").k == 273.15
+
+def reading_to_temperature(arr) -> Temperature:
+    # stitch together the temp reading bytes: the total data is 11 bits,
+    # with the most significant 8 in the high reg and the least significant 3
+    # in the top 3 bits of the low reg. So, OR them together as a 17 bits integer,
+    # then shift everything right by 5
+    # arr[1] = arr[1]>>5
+    # temp = int.from_bytes(arr, byteorder="big", signed=True) + 0.125
+    temp = ((arr[0] << 8 | arr[1]) >> 5) * 0.125
+    return Temperature(temp, "c")
+
+class Sensor:
     """Sensor([bus]) -> Sensor
     Return a new Sensor object that is connected to the
     specified I2C device interface.
     """
+    REG_ADDR_CONVERT = 0x01
+    REG_ADDR_CONFIG = 0x01
+
     REG_ADDR_TEMP_HIGH = 0x00
     REG_ADDR_TEMP_LOW = 0x29
+
+    REG_ADDR_EXT1_TEMP_HIGH = 0x01
+    REG_ADDR_EXT1_TEMP_LOW = 0x10
+
+    REG_ADDR_EXT2_TEMP_HIGH = 0x23
+    REG_ADDR_EXT2_TEMP_LOW = 0x24
+
+    REG_ADDR_EXT3_TEMP_HIGH = 0x2a
+    REG_ADDR_EXT3_TEMP_LOW = 0x2b
+
+    REG_ADDR_PRODUCT_ID = 0XFD
+
     REG_ADDR_LAST = 0xFF
+
     _bus = None
     _debug = False
     _i2c_addr = 0b1001100
 
-    def __init__(self, bus=0,  preinited_bus=None, debug=False, i2c_addr=0b1001100):
+    def __init__(self, bus=0, preinited_bus=None, debug=False, i2c_addr=0b1001100):
         # 0 = /dev/i2c-0 (port I2C0), 1 = /dev/i2c-1 (port I2C1), etc
         if preinited_bus is not None:
             if debug:
@@ -58,22 +159,54 @@ class Sensor(object):
 
         return self._bus.read_byte_data(self._i2c_addr, reg_addr)
 
-    def read(self):
+    def set_config(self, value):
+        self.__write_register(self.REG_ADDR_CONFIG, [value])
+
+    def read_device_type(self):
+        result = self.__read_register(self.REG_ADDR_PRODUCT_ID) & 0x7
+        device_id = "unknown"
+        if result & 0b100:
+            device_id = "MCP9904"
+        elif result & 0b1:
+            device_id = "MCP9903"
+        else:
+            device_id = "MCP9902"
+        return device_id
+
+    def set_conversion_rate(self, value):
+        self.__write_register(self.REG_ADDR_CONVERT, [(1<<7)|(value&0xf)])
+
+    def read(self, channel=0):
         """read()
         read the current temperature
         """
-        raw_temp_reg_low = self.__read_register(self.REG_ADDR_TEMP_LOW)
-        raw_temp_reg_high = self.__read_register(self.REG_ADDR_TEMP_HIGH)
+        if channel == 0:
+            data = [self.__read_register(self.REG_ADDR_TEMP_HIGH),
+                    self.__read_register(self.REG_ADDR_TEMP_LOW)]
+        elif channel == 1:
+            data = [
+                self.__read_register(self.REG_ADDR_EXT1_TEMP_HIGH),
+                self.__read_register(self.REG_ADDR_EXT1_TEMP_LOW)]
+        elif channel == 2:
+            data = [
+                self.__read_register(self.REG_ADDR_EXT2_TEMP_HIGH),
+                self.__read_register(self.REG_ADDR_EXT2_TEMP_LOW)]
+        elif channel == 3:
+            data = [
+                self.__read_register(self.REG_ADDR_EXT3_TEMP_HIGH),
+                self.__read_register(self.REG_ADDR_EXT3_TEMP_LOW)]
+        else:
+            raise ValueError("Unknown channel %s", channel)
 
         # stitch together the temp reading bytes: the total data is 11 bits,
         # with the most significant 8 in the high reg and the least significant 3
         # in the top 3 bits of the low reg. So, OR them together as a 17 bits integer,
         # then shift everything right by 5
-        raw_temp_reg = ((raw_temp_reg_high << 8) | raw_temp_reg_low) >> 5
         if self._debug:
-            print("reg: " + hex(raw_temp_reg))
+            for reg in data:
+                print("reg: " + hex(reg))
 
-        temp = raw_temp_reg * 0.125
+        temp = reading_to_temperature(data)
         if self._debug:
             print(str(temp))
 

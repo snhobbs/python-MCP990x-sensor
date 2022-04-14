@@ -26,6 +26,7 @@ def generate_table() -> Table:
 
 
 s = Sensor(1, i2c_addr=0x3c, debug=False)
+s.set_config((1<<2)) # enable extended range mode
 with Live(generate_table(), refresh_per_second=4) as live:
     while True:
         time.sleep(2)
